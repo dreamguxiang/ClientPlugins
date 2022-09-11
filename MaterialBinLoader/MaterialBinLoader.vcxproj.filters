@@ -27,9 +27,6 @@
     <ClInclude Include="Memory.h">
       <Filter>头文件</Filter>
     </ClInclude>
-    <ClInclude Include="ResourcePackManager.h">
-      <Filter>头文件\SDK</Filter>
-    </ClInclude>
     <ClInclude Include="Core.h">
       <Filter>头文件\SDK</Filter>
     </ClInclude>

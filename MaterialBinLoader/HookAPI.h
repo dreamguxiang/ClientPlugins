@@ -12,10 +12,38 @@
 
 #include <detours/detours.h>
 #include <unordered_map>
-
+#include <vector>
+#include <string>
+#include <thread>
 namespace Utils {
     static LPCSTR hModuleName;
     static bool running;
+}
+
+namespace {
+    namespace PtrConv {
+        inline std::string ptrToStr(uintptr_t ptr) {
+            std::ostringstream ss;
+            ss << std::hex << ((UINT64)ptr) << std::endl;
+            return ss.str();
+        }
+        inline void* uintptrToPtr(uintptr_t ptr) {
+            return (void*)ptr;
+        }
+        template <typename dst_type = void*, typename src_type = int>
+        inline void* toRawPtr(int src) {
+            return (void*)static_cast<__int64>(src);
+        }
+        template <typename dst_type = void*, typename src_type = __int64>
+        inline void* toRawPtr(__int64 src) {
+            return (void*)src;
+        }
+        template <typename dst_type, typename src_type>
+        inline dst_type toRawPtr(src_type src) {
+            static_assert(std::is_pointer<src_type>() || std::is_member_pointer<src_type>(), "HookAPI PtrConv::toRawPtr:src_type should be a pointer");
+            return *static_cast<dst_type*>(static_cast<void*>(&src));
+        }
+    } // namespace PtrConv
 }
 
 inline static void HookFunction__begin() {
@@ -140,18 +168,35 @@ static inline auto __imp_Call() {
     return ((ret(*)(p...))((void*)FindSig(Fn)));
 }
 
-#define AddrCall(fn, ret, ...) (__imp_Call<fn, ret, __VA_ARGS__>())
+template <void* Fn, typename ret, typename... p>
+static inline auto __imp_Call2() {
+    return ((ret(*)(p...))(Fn));
+}
+
+#define AddrCall(iname,fn, ret, ...) (__imp_Call<fn, ret, __VA_ARGS__>())
+
+#define AddrCall2(iname,fn, ret, ...) (__imp_Call2<fn, ret, __VA_ARGS__>())
 
 class THookRegister {
 public:
-    THookRegister(uintptr_t address, void* hook, void** org) {
-        auto ret = HookFunction((void*)address, org, hook);
+    THookRegister(void* address, void* hook, void** org) {
+        auto ret = HookFunction(address, org, hook);
         if (ret != 0) {
-            printf("FailedToHook: %lld\n", address);
+            printf("FailedToHook: %p\n", address);
         }
     }
+
     template <typename T>
-    THookRegister(uintptr_t address, T hook, void** org) {
+    THookRegister(const char* sym, T hook, void** org) {
+        union {
+            T a;
+            void* b;
+        } hookUnion;
+        hookUnion.a = hook;
+        THookRegister(sym, hookUnion.b, org);
+    }
+    template <typename T>
+    THookRegister(void* address, T hook, void** org) {
         union {
             T a;
             void* b;
@@ -167,7 +212,7 @@ struct THookTemplate;
 template <CHash, CHash>
 extern THookRegister THookRegisterTemplate;
 
-#define _AInstanceHook(class_inh, pclass, iname, addr, ret, ...)                              \
+#define _TInstanceHook(class_inh, pclass, iname, sym, ret, ...)                              \
     template <>                                                                              \
     struct THookTemplate<do_hash(iname), do_hash2(iname)> class_inh {                        \
         typedef ret (THookTemplate::*original_type)(__VA_ARGS__);                            \
@@ -183,17 +228,17 @@ extern THookRegister THookRegisterTemplate;
     };                                                                                       \
     template <>                                                                              \
     static THookRegister THookRegisterTemplate<do_hash(iname), do_hash2(iname)>{             \
-        addr, &THookTemplate<do_hash(iname), do_hash2(iname)>::_hook,                         \
+        sym, &THookTemplate<do_hash(iname), do_hash2(iname)>::_hook,                         \
         (void**)&THookTemplate<do_hash(iname), do_hash2(iname)>::_original()};               \
     ret THookTemplate<do_hash(iname), do_hash2(iname)>::_hook(__VA_ARGS__)
 
-#define _AInstanceDefHook(iname, addr, ret, type, ...) \
-    _AInstanceHook(                                   \
-        : public type, type, iname, addr, ret, VA_EXPAND(__VA_ARGS__))
-#define _AInstanceNoDefHook(iname, addr, ret, ...) \
-    _AInstanceHook(, void, iname, addr, ret, VA_EXPAND(__VA_ARGS__))
+#define _TInstanceDefHook(iname, sym, ret, type, ...) \
+    _TInstanceHook(                                   \
+        : public type, type, iname, sym, ret, VA_EXPAND(__VA_ARGS__))
+#define _TInstanceNoDefHook(iname, sym, ret, ...) \
+    _TInstanceHook(, void, iname, sym, ret, VA_EXPAND(__VA_ARGS__))
 
-#define _AStaticHook(pclass, iname, addr, ret, ...)                               \
+#define _TStaticHook(pclass, iname, sym, ret, ...)                               \
     template <>                                                                  \
     struct THookTemplate<do_hash(iname), do_hash2(iname)> pclass {               \
         typedef ret (*original_type)(__VA_ARGS__);                               \
@@ -209,31 +254,40 @@ extern THookRegister THookRegisterTemplate;
     };                                                                           \
     template <>                                                                  \
     static THookRegister THookRegisterTemplate<do_hash(iname), do_hash2(iname)>{ \
-        addr, &THookTemplate<do_hash(iname), do_hash2(iname)>::_hook,             \
+        sym, &THookTemplate<do_hash(iname), do_hash2(iname)>::_hook,             \
         (void**)&THookTemplate<do_hash(iname), do_hash2(iname)>::_original()};   \
     ret THookTemplate<do_hash(iname), do_hash2(iname)>::_hook(__VA_ARGS__)
 
-#define _AStaticDefHook(iname, addr, ret, type, ...) \
-    _AStaticHook(                                   \
-        : public type, iname, addr, ret, VA_EXPAND(__VA_ARGS__))
-#define _AStaticNoDefHook(iname, addr, ret, ...) \
-    _AStaticHook(, iname, addr, ret, VA_EXPAND(__VA_ARGS__))
+#define _TStaticDefHook(iname, sym, ret, type, ...) \
+    _TStaticHook(                                   \
+        : public type, iname, sym, ret, VA_EXPAND(__VA_ARGS__))
+#define _TStaticNoDefHook(iname, sym, ret, ...) \
+    _TStaticHook(, iname, sym, ret, VA_EXPAND(__VA_ARGS__))
 
+#define SHook2(iname, ret, sig, ...) _TStaticNoDefHook(iname, (void*)FindSig(sig), ret, VA_EXPAND(__VA_ARGS__))
+#define SHook(ret, sig, ...) SHook2(sig, ret, sig, VA_EXPAND(__VA_ARGS__))
+#define SStaticHook2(iname, ret, sig, type, ...) \
+    _TStaticDefHook(iname, (void*)FindSig(sig), ret, type, VA_EXPAND(__VA_ARGS__))
+#define SStaticHook(ret, sig, type, ...) SStaticHook2(sig, ret, sig, type, VA_EXPAND(__VA_ARGS__))
+#define SClasslessInstanceHook2(iname, ret, sig, ...) \
+    _TInstanceNoDefHook(iname, (void*)FindSig(sig), ret, VA_EXPAND(__VA_ARGS__))
+#define SClasslessInstanceHook(ret, sig, ...) \
+    SClasslessInstanceHook2(sig, ret, sig, VA_EXPAND(__VA_ARGS__))
+#define SInstanceHook2(iname, ret, sig, type, ...) \
+    _TInstanceDefHook(iname, (void*)FindSig(sig), ret, type, VA_EXPAND(__VA_ARGS__))
+#define SInstanceHook(ret, sig, type, ...) \
+    SInstanceHook2(sig, ret, sig, type, VA_EXPAND(__VA_ARGS__))
 
-#define AHook2(iname, ret, addr, ...) _AStaticNoDefHook(iname, addr, ret, VA_EXPAND(__VA_ARGS__))
-#define AHook(iname, ret, sym, ...) _AStaticNoDefHook(iname, FindSig(sym), ret, VA_EXPAND(__VA_ARGS__))
-
+#define AHook2(iname, ret, addr, ...) _TStaticNoDefHook(iname, PtrConv::toRawPtr<void*>(addr), ret, VA_EXPAND(__VA_ARGS__))
+#define AHook(ret, addr, ...) AHook2(#addr, ret, addr, VA_EXPAND(__VA_ARGS__))
 #define AStaticHook2(iname, ret, addr, type, ...) \
-    _AStaticDefHook(iname, addr, ret, type, VA_EXPAND(__VA_ARGS__))
-#define AStaticHook(iname, ret, sym, type, ...) \
-    _AStaticDefHook(iname, FindSig(sym), ret, type, VA_EXPAND(__VA_ARGS__))
-
+    _TStaticDefHook(iname, PtrConv::toRawPtr<void*>(addr), ret, type, VA_EXPAND(__VA_ARGS__))
+#define AStaticHook(ret, addr, type, ...) AStaticHook2(#addr, ret, addr, type, VA_EXPAND(__VA_ARGS__))
 #define AClasslessInstanceHook2(iname, ret, addr, ...) \
-    _AInstanceNoDefHook(iname, sym, ret, VA_EXPAND(__VA_ARGS__))
-#define AClasslessInstanceHook(iname, ret, sym, ...) \
-    _AInstanceNoDefHook(iname, FindSig(sym), ret, VA_EXPAND(__VA_ARGS__))
-
+    _TInstanceNoDefHook(iname, PtrConv::toRawPtr<void*>(addr), ret, VA_EXPAND(__VA_ARGS__))
+#define AClasslessInstanceHook(ret, addr, ...) \
+    AClasslessInstanceHook2(#addr, ret, addr, VA_EXPAND(__VA_ARGS__))
 #define AInstanceHook2(iname, ret, addr, type, ...) \
-    _AInstanceDefHook(iname, addr, ret, type, VA_EXPAND(__VA_ARGS__))
-#define AInstanceHook(iname, ret, sym, type, ...) \
-    _AInstanceDefHook(iname, FindSig(sym), ret, type, VA_EXPAND(__VA_ARGS__))
+    _TInstanceDefHook(iname, PtrConv::toRawPtr<void*>(addr), ret, type, VA_EXPAND(__VA_ARGS__))
+#define AInstanceHook(ret, addr, type, ...) \
+    AInstanceHook2(#addr, ret, addr, type, VA_EXPAND(__VA_ARGS__))

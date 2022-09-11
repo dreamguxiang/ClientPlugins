@@ -148,7 +148,6 @@
     <ClInclude Include="framework.h" />
     <ClInclude Include="HookAPI.h" />
     <ClInclude Include="Memory.h" />
-    <ClInclude Include="ResourcePackManager.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="dllmain.cpp">
